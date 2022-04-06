@@ -1,73 +1,48 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"math/rand"
-	"sync"
-	"time"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"golang.org/x/sync/errgroup"
 )
 
-const (
-	numberGoroutines = 4  // Number of goroutines to use.
-	taskLoad         = 10 // Amount of work to process.
-)
+/*
+基于 errgroup 实现一个 http server 的启动和关闭 ，以及 linux signal 信号的注册和处理，要保证能够一个退出，全部注销退出。
+*/
 
-// wg is used to wait for the program to finish.
-var wg sync.WaitGroup
-
-// init is called to initialize the package by the
-// Go runtime prior to any other code being executed.
-func init() {
-	// Seed the random number generator.
-	rand.Seed(time.Now().Unix())
-}
-
-// main is the entry point for all Go programs.
 func main() {
-	// Create a buffered channel to manage the task load.
-	tasks := make(chan string, taskLoad)
+	ctx := context.Background()
+	eg, errCtx := errgroup.WithContext(ctx)
+	eg.Go(func() error {
+		return http.ListenAndServe(":8080", nil)
+	})
+	eg.Go(
+		func() error {
+			<-ctx.Done()
+			fmt.Println("server shutdown")
+			return errors.New("server shutdown")
+		})
 
-	// Launch goroutines to handle the work.
-	wg.Add(numberGoroutines)
-	for gr := 1; gr <= numberGoroutines; gr++ {
-		go worker(tasks, gr)
+	eg.Go(
+		func() error {
+			quit := make(chan os.Signal, 0)
+			signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-quit:
+				return ctx.Err()
+			}
+		})
+
+	if err := eg.Wait(); err != nil {
+		fmt.Println(err)
 	}
-	// Add a bunch of work to get done.
-	for post := 1; post <= taskLoad; post++ {
-		tasks <- fmt.Sprintf("Task : %d", post)
-	}
-
-	// Close the channel so the goroutines will quit
-	// when all the work is done.
-	close(tasks)
-
-	// Wait for all the work to get done.
-	wg.Wait()
-}
-
-// worker is launched as a goroutine to process work from
-// the buffered channel.
-func worker(tasks chan string, worker int) {
-	// Report that we just returned.
-	defer wg.Done()
-
-	for {
-		// Wait for work to be assigned.
-		task, ok := <-tasks
-		if !ok {
-			// This means the channel is empty and closed.
-			fmt.Printf("Worker: %d : Shutting Down\n", worker)
-			return
-		}
-
-		// Display we are starting the work.
-		fmt.Printf("Worker: %d : Started %s\n", worker, task)
-
-		// Randomly wait to simulate work time.
-		sleep := rand.Int63n(100)
-		time.Sleep(time.Duration(sleep) * time.Millisecond)
-
-		// Display we finished the work.
-		fmt.Printf("Worker: %d : Completed %s\n", worker, task)
-	}
+	fmt.Println("exit")
 }
